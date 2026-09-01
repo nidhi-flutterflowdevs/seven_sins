@@ -1,19 +1,16 @@
 // supabase/functions/create_checkout_session/index.ts
 //
-// Called from FlutterFlow (API Connector) with the user's Supabase Auth
-// access token in the Authorization header. Resolves the caller's
-// public.users row via auth_user_id, creates (or reuses) a Stripe Customer,
-// opens a Checkout Session in subscription mode, and returns the URL.
+// If the user already has a live subscription, it is CANCELED immediately
+// (with proration credited to their Stripe balance) and a fresh Checkout
+// Session is opened for the new plan.
 //
-// IMPORTANT: every id written into Stripe metadata is the public.users id,
-// NOT the auth.users id — user_subscriptions.user_id has an FK to public.users.
+// Every id written into Stripe metadata is the public.users id, NOT the
+// auth.users id — user_subscriptions.user_id has an FK to public.users.
 //
-// Hosted deploy:
-//   supabase secrets set STRIPE_SECRET_KEY=sk_test_...
+// Deploy:  supabase functions deploy create_checkout_session
 
 import { createClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
-
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -23,6 +20,8 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
   apiVersion: "2024-06-20",
   httpClient: Stripe.createFetchHttpClient(),
 });
+
+const LIVE_STATUSES = ["active", "trialing", "past_due"];
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -41,8 +40,6 @@ Deno.serve(async (req) => {
       return json({ error: "Missing Authorization header" }, 401);
     }
 
-    // Client bound to the caller's JWT — used ONLY to identify the user.
-    // Must use the anon key here, not the service role key.
     const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
@@ -65,15 +62,13 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Service-role client — bypasses RLS.
     const supabaseAdmin = createClient(
       SUPABASE_URL,
       SUPABASE_SERVICE_ROLE_KEY,
       { auth: { persistSession: false, autoRefreshToken: false } },
     );
 
-    // Translate auth.users.id -> public.users.id. Everything downstream
-    // (Stripe metadata, user_subscriptions.user_id) uses the public id.
+    // Translate auth.users.id -> public.users.id.
     const { data: profile, error: profileError } = await supabaseAdmin
       .from("users")
       .select("id, email")
@@ -83,31 +78,67 @@ Deno.serve(async (req) => {
     if (profileError) throw profileError;
 
     if (!profile) {
-      console.error(
-        "No public.users row for auth_user_id:",
-        authUser.id,
-        authUser.email,
-      );
+      console.error("No public.users row for auth_user_id:", authUser.id);
       return json({ error: "No user profile found" }, 404);
     }
 
     const publicUserId = profile.id as string;
     const email = (profile.email as string | null) ?? authUser.email ?? undefined;
 
-    // Reuse an existing Stripe customer for this user if we have one.
-    const { data: existingRow, error: existingError } = await supabaseAdmin
+    // ---------- Cancel any live subscription ----------
+
+    const { data: rows, error: rowsError } = await supabaseAdmin
       .from("user_subscriptions")
-      .select("stripe_customer_id")
+      .select("stripe_subscription_id, stripe_customer_id, stripe_price_id, status")
       .eq("user_id", publicUserId)
-      .not("stripe_customer_id", "is", null)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .order("created_at", { ascending: false });
 
-    if (existingError) throw existingError;
+    if (rowsError) throw rowsError;
 
-    let customerId: string | undefined =
-      existingRow?.stripe_customer_id ?? undefined;
+    let customerId: string | undefined = rows?.find(
+      (r) => r.stripe_customer_id,
+    )?.stripe_customer_id ?? undefined;
+
+    const canceled: string[] = [];
+
+    for (const row of rows ?? []) {
+      if (!LIVE_STATUSES.includes(row.status)) continue;
+
+      // Our row may be stale — confirm against Stripe before canceling.
+      let current: Stripe.Subscription;
+      try {
+        current = await stripe.subscriptions.retrieve(
+          row.stripe_subscription_id,
+        );
+      } catch (err) {
+        console.warn(
+          "Could not retrieve subscription, skipping:",
+          row.stripe_subscription_id,
+          err,
+        );
+        continue;
+      }
+
+      if (!LIVE_STATUSES.includes(current.status)) continue;
+
+      if (current.items.data[0]?.price?.id === price_id) {
+        return json({ error: "Already subscribed to this plan" }, 409);
+      }
+
+      // Immediate cancel. Unused time is credited to the customer's
+      // Stripe balance and applied to their next invoice.
+      await stripe.subscriptions.cancel(current.id, { prorate: true });
+      canceled.push(current.id);
+
+      console.log("Canceled previous subscription", {
+        publicUserId,
+        subId: current.id,
+        oldPrice: current.items.data[0]?.price?.id,
+        newPrice: price_id,
+      });
+    }
+
+    // ---------- Fresh checkout for the new plan ----------
 
     if (!customerId) {
       const customer = await stripe.customers.create({
@@ -134,9 +165,10 @@ Deno.serve(async (req) => {
       publicUserId,
       customerId,
       sessionId: session.id,
+      canceled,
     });
 
-    return json({ url: session.url }, 200);
+    return json({ url: session.url, canceled_subscriptions: canceled }, 200);
   } catch (err) {
     console.error(err);
     return json({ error: (err as Error).message }, 500);

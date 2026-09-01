@@ -4,8 +4,8 @@
 // via Stripe's hosted Customer Portal. Call this from a "Manage
 // Subscription" button in FlutterFlow, then open the returned url.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import Stripe from "https://esm.sh/stripe@16.12.0?target=deno";
+import { createClient } from "@supabase/supabase-js";
+import Stripe from "stripe";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;

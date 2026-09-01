@@ -1,6 +1,17 @@
+// supabase/functions/stripe_webhook/index.ts
+//
+// Deploy with:  supabase functions deploy stripe_webhook --no-verify-jwt
+// Stripe calls this directly and sends no Supabase JWT.
+//
+// Secrets required:
+//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (auto-populated by Supabase)
+//   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET (set via `supabase secrets set`)
+//
+// NOTE: ids and period timestamps are read defensively — on API version
+// 2026-07-29.dahlia Stripe moved several of them.
+
 import { createClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
-
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -14,6 +25,8 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
+
+const LIVE_STATUSES = ["active", "trialing", "past_due"];
 
 /** Pulls the subscription id from an invoice or checkout session across API versions. */
 // deno-lint-ignore no-explicit-any
@@ -68,14 +81,19 @@ Deno.serve(async (req) => {
         const session = event.data.object as any;
         const subId = extractSubscriptionId(session);
 
-        console.log("checkout.session.completed", {
-          mode: session.mode,
-          subId,
-        });
+        console.log("checkout.session.completed", { mode: session.mode, subId });
 
         if (session.mode === "subscription" && subId) {
           const subscription = await stripe.subscriptions.retrieve(subId);
           await syncSubscription(subscription, session);
+
+          // A new plan just went live — retire anything else still
+          // marked live for this user (belt and braces alongside the
+          // cancel in create_checkout_session).
+          const userId = extractUserId(subscription, session);
+          if (userId) {
+            await supersedeOtherSubscriptions(userId, subscription.id);
+          }
         }
         break;
       }
@@ -83,10 +101,22 @@ Deno.serve(async (req) => {
       case "customer.subscription.created":
       case "customer.subscription.updated":
       case "customer.subscription.deleted": {
-        await syncSubscription(event.data.object as Stripe.Subscription);
+        const subscription = event.data.object as Stripe.Subscription;
+        await syncSubscription(subscription);
+
+        if (
+          event.type === "customer.subscription.created" &&
+          LIVE_STATUSES.includes(subscription.status)
+        ) {
+          const userId = extractUserId(subscription);
+          if (userId) {
+            await supersedeOtherSubscriptions(userId, subscription.id);
+          }
+        }
         break;
       }
 
+      case "invoice.paid":
       case "invoice.payment_failed":
       case "invoice.payment_succeeded": {
         // deno-lint-ignore no-explicit-any
@@ -165,13 +195,11 @@ async function syncSubscription(
   // Period timestamps also moved in newer API versions — check both places.
   // deno-lint-ignore no-explicit-any
   const sub = subscription as any;
-  const item = subscription.items.data[0];
-  
   // deno-lint-ignore no-explicit-any
-  const periodStart = sub.current_period_start ?? (item as any)?.current_period_start ?? null;
-  // deno-lint-ignore no-explicit-any
-  const periodEnd = sub.current_period_end ?? (item as any)?.current_period_end ?? null;
-  
+  const item = subscription.items.data[0] as any;
+  const periodStart = sub.current_period_start ?? item?.current_period_start ?? null;
+  const periodEnd = sub.current_period_end ?? item?.current_period_end ?? null;
+
   console.log("Upserting subscription:", {
     userId,
     subId: subscription.id,
@@ -215,4 +243,68 @@ async function syncSubscription(
   if (syncError) throw syncError;
 
   console.log("Synced subscription for user:", userId);
+}
+
+/**
+ * A user should only ever have one live subscription. When a new one goes
+ * live, cancel any other rows still marked live in Stripe, then reflect
+ * that locally.
+ */
+async function supersedeOtherSubscriptions(
+  userId: string,
+  keepSubscriptionId: string,
+) {
+  const { data: rows, error } = await supabaseAdmin
+    .from("user_subscriptions")
+    .select("stripe_subscription_id, status")
+    .eq("user_id", userId)
+    .in("status", LIVE_STATUSES)
+    .neq("stripe_subscription_id", keepSubscriptionId);
+
+  if (error) throw error;
+  if (!rows || rows.length === 0) return;
+
+  for (const row of rows) {
+    try {
+      const current = await stripe.subscriptions.retrieve(
+        row.stripe_subscription_id,
+      );
+
+      if (LIVE_STATUSES.includes(current.status)) {
+        const canceled = await stripe.subscriptions.cancel(current.id, {
+          prorate: true,
+        });
+        console.log("Superseded old subscription", {
+          userId,
+          subId: canceled.id,
+          keptSubId: keepSubscriptionId,
+        });
+        // The resulting customer.subscription.deleted event will sync
+        // the row, but write it now so there is no window where the
+        // user appears to hold two live subscriptions.
+        await supabaseAdmin
+          .from("user_subscriptions")
+          .update({ status: canceled.status, updated_at: new Date().toISOString() })
+          .eq("stripe_subscription_id", canceled.id);
+      } else {
+        // Already gone in Stripe — just correct our copy.
+        await supabaseAdmin
+          .from("user_subscriptions")
+          .update({ status: current.status, updated_at: new Date().toISOString() })
+          .eq("stripe_subscription_id", current.id);
+      }
+    } catch (err) {
+      console.warn(
+        "Could not supersede subscription:",
+        row.stripe_subscription_id,
+        err,
+      );
+    }
+  }
+
+  const { error: syncError } = await supabaseAdmin.rpc(
+    "sync_user_subscription_flags",
+    { p_user_id: userId },
+  );
+  if (syncError) throw syncError;
 }
