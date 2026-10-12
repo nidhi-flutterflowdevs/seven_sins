@@ -18,9 +18,8 @@ extra_search_path = ["public", "extensions"]
 max_rows = 1000
 # Controls whether new tables, views, sequences and functions created in the `public` schema by
 # `postgres` are reachable through the Data API roles (`anon`, `authenticated`, `service_role`)
-# without explicit GRANTs. When unset, new entities are NOT auto-exposed, matching the new cloud
-# default. Set to `true` to keep the legacy behaviour of auto-exposing new entities; this is
-# deprecated and the field is removed on 2026-10-30 once the always-revoked behaviour is permanent.
+# without explicit GRANTs, matching the cloud default. Set to `false` to require explicit GRANTs
+# instead. Left unset, a fresh project falls back to `true`.
 # auto_expose_new_tables = true
 
 [api.tls]
@@ -40,6 +39,8 @@ health_timeout = "2m"
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
 # server_version;` on the remote database to check.
 major_version = 17
+# OrioleDB version to use as the Postgres storage engine. Leave empty to use the default engine.
+orioledb_version = ""
 
 [db.pooler]
 enabled = false
@@ -252,7 +253,7 @@ otp_expiry = 3600
 # [auth.email.notification.password_changed]
 # enabled = true
 # subject = "Your password has been changed"
-# content_path = "./templates/password_changed_notification.html"
+# content_path = "./supabase/templates/password_changed_notification.html"
 
 [auth.sms]
 # Allow/disallow new user signups via SMS to your project.
@@ -393,8 +394,6 @@ backend = "postgres"
 
 # Experimental features may be deprecated any time
 [experimental]
-# Configures Postgres storage engine to use OrioleDB (S3)
-orioledb_version = ""
 # Configures S3 bucket URL, eg. <bucket_name>.s3-<region>.amazonaws.com
 s3_host = "env(S3_HOST)"
 # Configures S3 bucket region, eg. us-east-1
@@ -409,94 +408,19 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 [experimental.pgdelta]
 enabled = true
 # Directory under `supabase/` where declarative files are written.
-# declarative_schema_path = "./database"
-# JSON string passed through to pg-delta SQL formatting.
-# format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+# declarative_schema_path = "./schemas"
+# JSON string passed through to pg-delta SQL formatting. When omitted, SQL is
+# formatted with uppercase keywords, indent 2, max width 180, trailing commas,
+# and column/key alignment. Set to "null" to emit raw, unformatted SQL.
+# format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":180,\"commaStyle\":\"trailing\"}"
 
-[functions.slot_creation]
+[functions.process_provider_payout]
 enabled = true
 verify_jwt = false
-import_map = "./functions/slot_creation/deno.json"
+import_map = "./functions/process_provider_payout/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/slot_creation/index.ts"
+entrypoint = "./functions/process_provider_payout/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/slot_creation/*.html" ]
-
-[functions.slot_creation_cron]
-enabled = true
-verify_jwt = false
-import_map = "./functions/slot_creation_cron/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/slot_creation_cron/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/slot_creation_cron/*.html" ]
-
-[functions.send_notification]
-enabled = true
-verify_jwt = false
-import_map = "./functions/send_notification/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/send_notification/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/send_notification/*.html" ]
-
-[functions.create_checkout_session]
-enabled = true
-verify_jwt = false
-import_map = "./functions/create_checkout_session/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/create_checkout_session/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/create_checkout_session/*.html" ]
-
-[functions.stripe_webhook]
-enabled = true
-verify_jwt = false
-import_map = "./functions/stripe_webhook/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/stripe_webhook/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/stripe_webhook/*.html" ]
-
-[functions.create_portal_session]
-enabled = true
-verify_jwt = false
-import_map = "./functions/create_portal_session/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/create_portal_session/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/create_portal_session/*.html" ]
-
-[functions.cancel_subscription]
-enabled = true
-verify_jwt = false
-import_map = "./functions/cancel_subscription/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/cancel_subscription/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/cancel_subscription/*.html" ]
-
-[functions.provider_statement_pdf]
-enabled = true
-verify_jwt = false
-import_map = "./functions/provider_statement_pdf/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/provider_statement_pdf/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/provider_statement_pdf/*.html" ]
+# static_files = [ "./functions/process_provider_payout/*.html" ]
