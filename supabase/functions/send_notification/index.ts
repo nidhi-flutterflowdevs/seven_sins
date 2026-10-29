@@ -1,7 +1,5 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 
-console.log("Hello from Functions!");
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -12,29 +10,18 @@ const corsHeaders = {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders,
-    });
+    return new Response(null, { status: 204, headers: corsHeaders });
   }
 
   try {
     const payload = await req.json();
 
-    console.log(
-      "Received JSON payload:",
-      JSON.stringify(payload, null, 2),
-    );
+    console.log("Received JSON payload:", JSON.stringify(payload, null, 2));
 
     if (!payload || typeof payload !== "object") {
       return new Response(
-        JSON.stringify({
-          error: "Invalid payload",
-        }),
-        {
-          status: 400,
-          headers: corsHeaders,
-        },
+        JSON.stringify({ error: "Invalid payload" }),
+        { status: 400, headers: corsHeaders },
       );
     }
 
@@ -45,23 +32,17 @@ Deno.serve(async (req) => {
       app_id: Deno.env.get("ONESIGNAL_APP_ID")!,
 
       ...(Array.isArray(payload.send_to) && payload.send_to.length > 0
-        ? {
-            include_external_user_ids: payload.send_to,
-          }
-        : {
-            included_segments: ["Total Subscriptions"],
-          }),
+        ? { include_external_user_ids: payload.send_to }
+        : { included_segments: ["Total Subscriptions"] }),
 
-      contents: {
-        en: content,
-      },
-
-      headings: {
-        en: title,
-      },
+      contents: { en: content },
+      headings: { en: title },
 
       data: {
         type: payload.type,
+        // What to open on tap — a chat id, booking id, whatever the
+        // type implies. Read by the app's notification handler.
+        key: payload.key ?? null,
         title: payload.title,
         description: payload.description,
       },
@@ -83,36 +64,20 @@ Deno.serve(async (req) => {
     );
 
     const responseData = await response.json();
-
-    console.log(
-      "OneSignal API Response:",
-      responseData,
-    );
+    console.log("OneSignal API Response:", responseData);
 
     return new Response(
       JSON.stringify({
         message: "Payload received successfully",
         oneSignalResponse: responseData,
       }),
-      {
-        status: response.ok ? 200 : response.status,
-        headers: corsHeaders,
-      },
+      { status: response.ok ? 200 : response.status, headers: corsHeaders },
     );
   } catch (error) {
-    console.error(
-      "Error making OneSignal API request:",
-      error,
-    );
-
+    console.error("Error making OneSignal API request:", error);
     return new Response(
-      JSON.stringify({
-        error: "Failed to process notification",
-      }),
-      {
-        status: 500,
-        headers: corsHeaders,
-      },
+      JSON.stringify({ error: "Failed to process notification" }),
+      { status: 500, headers: corsHeaders },
     );
   }
 });
